@@ -98,6 +98,8 @@ async function getBrowserLauncher (browser: Browser, browsers: FoundBrowser[]): 
 
   if (browser.family === 'chromium') return require('./chrome')
 
+  if (browser.family === 'cloudflare') return require('./cloudflare')
+
   if (browser.family === 'firefox') return require('./firefox')
 
   if (browser.family === 'webkit') return require('./webkit')

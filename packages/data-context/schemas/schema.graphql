@@ -41,6 +41,7 @@ type Browser implements Node {
 
 enum BrowserFamily {
   chromium
+  cloudflare
   firefox
   webkit
 }

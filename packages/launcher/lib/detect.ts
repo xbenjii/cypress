@@ -144,6 +144,28 @@ function checkOneBrowser (browser: Browser): Promise<boolean | HasVersion> {
   .catch(failed)
 }
 
+/** If Cloudflare Browser Run credentials are configured, return a virtual browser entry */
+function detectCloudflareBrowser (): FoundBrowser | undefined {
+  const accountId = process.env.CYPRESS_CLOUDFLARE_ACCOUNT_ID
+  const apiToken = process.env.CYPRESS_CLOUDFLARE_API_TOKEN
+
+  if (!accountId || !apiToken) {
+    return undefined
+  }
+
+  debug('Cloudflare Browser Run credentials detected')
+
+  return {
+    name: 'cloudflare',
+    family: 'cloudflare',
+    channel: 'stable',
+    displayName: 'Cloudflare',
+    version: '1.0.0',
+    majorVersion: '1',
+    path: 'cloudflare',
+  }
+}
+
 /** returns list of detected browsers */
 export const detect = (goalBrowsers?: Browser[]): Bluebird<FoundBrowser[]> => {
   // we can detect same browser under different aliases
@@ -162,6 +184,15 @@ export const detect = (goalBrowsers?: Browser[]): Bluebird<FoundBrowser[]> => {
   .then((val) => _.flatten(val))
   .then(compactFalse)
   .then(removeDuplicateBrowsers)
+  .then((browsers) => {
+    const cloudflareBrowser = detectCloudflareBrowser()
+
+    if (cloudflareBrowser) {
+      browsers.push(cloudflareBrowser)
+    }
+
+    return browsers
+  })
 }
 
 export const detectByPath = (
