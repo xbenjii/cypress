@@ -9,7 +9,7 @@ import { EventEmitter } from 'events'
 import readline from 'readline'
 import createDebug from 'debug'
 import { PassThrough } from 'stream'
-import { stdin, stdout, stderr } from 'process'
+import process, { stdin, stdout, stderr } from 'process'
 
 import state from '../../../lib/tasks/state'
 import xvfb from '../../../lib/exec/xvfb'
@@ -72,6 +72,7 @@ vi.mock('process', async (importActual) => {
       on: vi.fn(),
       emit: vi.fn(),
       pipe: vi.fn(),
+      setRawMode: vi.fn(),
     },
     stdout: vi.fn(),
     stderr: {
@@ -88,6 +89,7 @@ vi.mock('process', async (importActual) => {
         on: vi.fn(),
         emit: vi.fn(),
         pipe: vi.fn(),
+        setRawMode: vi.fn(),
       },
       stdout: vi.fn(),
       stderr: {
@@ -95,6 +97,7 @@ vi.mock('process', async (importActual) => {
         ...actual.default.stderr,
         write: vi.fn(),
       },
+      once: vi.fn(),
     },
   }
 })
@@ -428,20 +431,38 @@ describe('lib/exec/spawn', function () {
 
     describe('detects kill signal', async () => {
       it('exits with error on SIGKILL', async () => {
-        try {
           const startPromise = start('--foo')
 
           await vi.waitFor(() => expect(spawnedProcess.on).toHaveBeenCalledWith('exit', expect.any(Function)))
           spawnedProcess.emit('exit', null, 'SIGKILL')
 
+          await expect(startPromise).resolves.toEqual(137)
+      })
+    })
+
+    describe('on signal exits', () => {
+      for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+        it(`disables raw mode on ${signal}`, async () => {
+          vi.mocked(process.stdin).isTTY = true
+          const startPromise = start('--foo')
+
+          await vi.waitFor(() => expect(spawnedProcess.on).toHaveBeenCalledWith('close', expect.any(Function)))
+          await vi.waitFor(() => {
+            expect(process.once).toHaveBeenCalledWith(signal, expect.any(Function))
+          })
+
+          const handler = vi.mocked(process.once).mock.calls.find((c) => c[0] === signal)?.[1] as () => void
+
+          expect(handler).toBeDefined()
+          await handler()
+
+          spawnedProcess.emit('exit', null, signal)
+
           await startPromise
 
-          throw new Error('should have hit error handler but did not')
-        } catch (e) {
-          expect(e.message).toMatch(/SIGKILL/)
-          expect(e.message).toMatchSnapshot()
-        }
-      })
+          expect(process.stdin.setRawMode).toHaveBeenCalledWith(false)
+        })
+      }
     })
 
     it('does not start xvfb when its not needed', async () => {
@@ -533,15 +554,81 @@ describe('lib/exec/spawn', function () {
       }
     })
 
-    it('unrefs if options.detached is true', async () => {
-      const startPromise = start(null, { detached: true })
+    describe('detached mode', () => {
+      let stdoutDataHandler: ((data: Buffer) => void) | undefined
 
-      await vi.waitFor(() => expect(spawnedProcess.on).toHaveBeenCalledWith('close', expect.any(Function)))
-      spawnedProcess.emit('close', 0)
+      beforeEach(() => {
+        stdoutDataHandler = undefined
 
-      await startPromise
+        spawnedProcess.stdout = {
+          on: vi.fn().mockImplementation((event: string, handler: any) => {
+            if (event === 'data') stdoutDataHandler = handler
+          }),
+          destroy: vi.fn(),
+          pipe: vi.fn(),
+        }
 
-      expect(spawnedProcess.unref).toHaveBeenCalledOnce()
+        spawnedProcess.stderr = {
+          on: vi.fn(),
+          pipe: vi.fn(),
+          destroy: vi.fn(),
+        }
+      })
+
+      it('waits for ready sentinel before unreffing and resolving', async () => {
+        const startPromise = start(null, { detached: true })
+
+        await vi.waitFor(() => expect(stdoutDataHandler).toBeDefined())
+
+        expect(spawnedProcess.unref).not.toHaveBeenCalled()
+
+        stdoutDataHandler!(Buffer.from('Cypress is ready\n'))
+
+        await startPromise
+
+        expect(spawnedProcess.unref).toHaveBeenCalledOnce()
+        expect(spawnedProcess.stdout.destroy).toHaveBeenCalledOnce()
+        expect(spawnedProcess.stderr.destroy).toHaveBeenCalledOnce()
+      })
+
+      it('resolves with exit code if process exits before ready message', async () => {
+        const startPromise = start(null, { detached: true })
+
+        await vi.waitFor(() => expect(spawnedProcess.on).toHaveBeenCalledWith('close', expect.any(Function)))
+        spawnedProcess.emit('close', 1)
+
+        const code = await startPromise
+
+        expect(code).toBe(1)
+        expect(spawnedProcess.unref).not.toHaveBeenCalled()
+      })
+
+      it('uses piped stdio when detached so startup errors are visible', async () => {
+        const startPromise = start(null, { detached: true })
+
+        await vi.waitFor(() => expect(stdoutDataHandler).toBeDefined())
+        stdoutDataHandler!(Buffer.from('Cypress is ready\n'))
+        await startPromise
+
+        // @ts-expect-error - mock argument
+        const thirdArg = cp.spawn.mock.calls[0][2]
+
+        expect(thirdArg.stdio).toEqual(['ignore', 'pipe', 'pipe'])
+      })
+
+      it('passes --emit-when-ready to the Cypress process', async () => {
+        const startPromise = start(null, { detached: true })
+
+        await vi.waitFor(() => expect(stdoutDataHandler).toBeDefined())
+
+        // @ts-expect-error - vitest mock
+        const spawnArgs = cp.spawn.mock.calls[0][1]
+
+        expect(spawnArgs).toContain('--emit-when-ready')
+
+        stdoutDataHandler!(Buffer.from('Cypress is ready\n'))
+        await startPromise
+      })
     })
 
     it('does not unref by default', async () => {

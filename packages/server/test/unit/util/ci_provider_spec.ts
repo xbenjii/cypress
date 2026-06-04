@@ -44,6 +44,8 @@ describe('lib/util/ci_provider', () => {
       CYPRESS_PULL_REQUEST_ID: 'cypressPullRequestId',
       CYPRESS_PULL_REQUEST_URL: 'cypressPullRequestUrl',
       CYPRESS_CI_BUILD_URL: 'cypressCiBuildUrl',
+      CYPRESS_RERUN_GROUP_ID: 'cypressRerunGroupId',
+      CYPRESS_RERUN_ALL_TESTS: 'cypressRerunAllTests',
     }, { clear: true })
 
     expectsName(null)
@@ -51,6 +53,8 @@ describe('lib/util/ci_provider', () => {
       cypressPullRequestId: 'cypressPullRequestId',
       cypressPullRequestUrl: 'cypressPullRequestUrl',
       cypressCiBuildUrl: 'cypressCiBuildUrl',
+      cypressRerunGroupId: 'cypressRerunGroupId',
+      cypressRerunAllTests: 'cypressRerunAllTests',
     })
 
     return expectsCommitParams(null)
@@ -85,6 +89,8 @@ describe('lib/util/ci_provider', () => {
 
     expect(providers).to.deep.eq([
       'appveyor',
+      'argoCd',
+      'argoWorkflows',
       'awsAmplifyConsole',
       'awsCodeBuild',
       'azure',
@@ -163,6 +169,70 @@ describe('lib/util/ci_provider', () => {
     return expectsCommitParams({
       message: 'repoCommitMessage\nrepoCommitMessageExtended',
     })
+  })
+
+  it('argoCd', () => {
+    resetEnv = mockedEnv({
+      ARGOCD_APP_NAME: 'argoCdAppName',
+      ARGOCD_APP_NAMESPACE: 'argoCdAppNamespace',
+      ARGOCD_APP_PROJECT_NAME: 'argoCdAppProjectName',
+      ARGOCD_APP_REVISION: 'argoCdAppRevision',
+      ARGOCD_APP_REVISION_SHORT: 'argoCdAppRevisionShort',
+      ARGOCD_APP_REVISION_SHORT_8: 'argoCdRev8',
+      ARGOCD_APP_SOURCE_PATH: 'argoCdAppSourcePath',
+      ARGOCD_APP_SOURCE_REPO_URL: 'https://github.com/org/repo.git',
+      ARGOCD_APP_SOURCE_TARGET_REVISION: 'main',
+      KUBE_VERSION: '1.28.0',
+      KUBE_API_VERSIONS: 'apps/v1,batch/v1',
+    }, { clear: true })
+
+    expectsName('argoCd')
+    expectsCiParams({
+      argocdAppName: 'argoCdAppName',
+      argocdAppNamespace: 'argoCdAppNamespace',
+      argocdAppProjectName: 'argoCdAppProjectName',
+      argocdAppRevision: 'argoCdAppRevision',
+      argocdAppRevisionShort: 'argoCdAppRevisionShort',
+      argocdAppRevisionShort8: 'argoCdRev8',
+      argocdAppSourcePath: 'argoCdAppSourcePath',
+      argocdAppSourceRepoUrl: 'https://github.com/org/repo.git',
+      argocdAppSourceTargetRevision: 'main',
+      kubeVersion: '1.28.0',
+      kubeApiVersions: 'apps/v1,batch/v1',
+    })
+
+    expectsCommitParams({
+      sha: 'argoCdAppRevision',
+      branch: 'main',
+      remoteOrigin: 'https://github.com/org/repo.git',
+    })
+
+    return undefined
+  })
+
+  it('argoWorkflows', () => {
+    resetEnv = mockedEnv({
+      ARGO_WORKFLOW_NAME: 'argoWorkflowName',
+      ARGO_WORKFLOW_UID: 'argoWorkflowUid',
+      ARGO_NODE_ID: 'argoNodeId',
+      ARGO_POD_NAME: 'argoPodName',
+      ARGO_POD_UID: 'argoPodUid',
+      ARGO_CONTAINER_NAME: 'argoContainerName',
+      ARGO_INSTANCE_ID: 'argoInstanceId',
+    }, { clear: true })
+
+    expectsName('argoWorkflows')
+    expectsCiParams({
+      argoWorkflowName: 'argoWorkflowName',
+      argoWorkflowUid: 'argoWorkflowUid',
+      argoNodeId: 'argoNodeId',
+      argoPodName: 'argoPodName',
+      argoPodUid: 'argoPodUid',
+      argoContainerName: 'argoContainerName',
+      argoInstanceId: 'argoInstanceId',
+    })
+
+    return expectsCommitParams({})
   })
 
   it('awsCodeBuild', () => {
@@ -395,6 +465,7 @@ describe('lib/util/ci_provider', () => {
       BITBUCKET_PR_ID: 'bitbucketPrId',
       BITBUCKET_PR_DESTINATION_BRANCH: 'bitbucketPrDestinationBranch',
       BITBUCKET_PR_DESTINATION_COMMIT: 'bitbucketPrDestinationCommit',
+      BITBUCKET_PIPELINE_UUID: 'bitbucketPipelineUuid',
     }, { clear: true })
 
     expectsName('bitbucket')
@@ -407,6 +478,7 @@ describe('lib/util/ci_provider', () => {
       bitbucketPrId: 'bitbucketPrId',
       bitbucketPrDestinationBranch: 'bitbucketPrDestinationBranch',
       bitbucketPrDestinationCommit: 'bitbucketPrDestinationCommit',
+      bitbucketPipelineUuid: 'bitbucketPipelineUuid',
     })
 
     expectsCommitParams({
@@ -588,6 +660,8 @@ describe('lib/util/ci_provider', () => {
       CIRCLE_PULL_REQUEST: 'circlePullRequest',
       CIRCLE_REPOSITORY_URL: 'circleRepositoryUrl',
       CI_PULL_REQUEST: 'ciPullRequest',
+      CIRCLE_PROJECT_REPONAME: 'circleProjectReponame',
+      CIRCLE_WORKFLOW_WORKSPACE_ID: 'circleWorkflowWorkspaceId',
 
       CIRCLE_SHA1: 'circleSha',
       CIRCLE_BRANCH: 'circleBranch',
@@ -609,6 +683,8 @@ describe('lib/util/ci_provider', () => {
       circlePullRequest: 'circlePullRequest',
       circleRepositoryUrl: 'circleRepositoryUrl',
       ciPullRequest: 'ciPullRequest',
+      circleProjectReponame: 'circleProjectReponame',
+      circleWorkflowWorkspaceId: 'circleWorkflowWorkspaceId',
     })
 
     return expectsCommitParams({
@@ -1060,6 +1136,57 @@ describe('lib/util/ci_provider', () => {
       return expectsName('jenkins')
     })
 
+    it('strips the remote prefix the Git plugin adds to GIT_BRANCH', () => {
+      resetEnv = mockedEnv({
+        JENKINS_URL: 'true',
+
+        GIT_COMMIT: 'gitCommit',
+        GIT_BRANCH: 'origin/feature/foo',
+      }, { clear: true })
+
+      expectsName('jenkins')
+
+      return expectsCommitParams({
+        sha: 'gitCommit',
+        branch: 'feature/foo',
+      })
+    })
+
+    it('prefers the unprefixed BRANCH_NAME (multibranch pipeline) over GIT_BRANCH', () => {
+      resetEnv = mockedEnv({
+        JENKINS_URL: 'true',
+
+        GIT_COMMIT: 'gitCommit',
+        BRANCH_NAME: 'branchName',
+        GIT_BRANCH: 'origin/branchName',
+      }, { clear: true })
+
+      expectsName('jenkins')
+
+      return expectsCommitParams({
+        sha: 'gitCommit',
+        branch: 'branchName',
+      })
+    })
+
+    it('prefers the unprefixed GIT_LOCAL_BRANCH over GIT_BRANCH', () => {
+      resetEnv = mockedEnv({
+        JENKINS_URL: 'true',
+
+        GIT_COMMIT: 'gitCommit',
+        GIT_LOCAL_BRANCH: 'localBranch',
+        BRANCH_NAME: 'branchName',
+        GIT_BRANCH: 'origin/branchName',
+      }, { clear: true })
+
+      expectsName('jenkins')
+
+      return expectsCommitParams({
+        sha: 'gitCommit',
+        branch: 'localBranch',
+      })
+    })
+
     it('with change request params (PR Scenario)', () => {
       resetEnv = mockedEnv({
         JENKINS_URL: 'true',
@@ -1106,6 +1233,8 @@ describe('lib/util/ci_provider', () => {
         CYPRESS_PULL_REQUEST_ID: 'cypressPullRequestId',
         CYPRESS_PULL_REQUEST_URL: 'cypressPullRequestUrl',
         CYPRESS_CI_BUILD_URL: 'cypressCiBuildUrl',
+        CYPRESS_RERUN_GROUP_ID: 'cypressRerunGroupId',
+        CYPRESS_RERUN_ALL_TESTS: 'cypressRerunAllTests',
 
         GIT_COMMIT: 'gitCommit',
         GIT_BRANCH: 'gitBranch',
@@ -1118,6 +1247,8 @@ describe('lib/util/ci_provider', () => {
         cypressPullRequestId: 'cypressPullRequestId',
         cypressPullRequestUrl: 'cypressPullRequestUrl',
         cypressCiBuildUrl: 'cypressCiBuildUrl',
+        cypressRerunGroupId: 'cypressRerunGroupId',
+        cypressRerunAllTests: 'cypressRerunAllTests',
       })
 
       return expectsCommitParams({
@@ -1283,6 +1414,8 @@ describe('lib/util/ci_provider', () => {
       SYSTEM_STAGEATTEMPT: 'stageAttempt',
       SYSTEM_PHASEATTEMPT: 'phaseAttempt',
       SYSTEM_JOBATTEMPT: 'jobAttempt',
+      SYSTEM_TEAMPROJECT: 'teamProject',
+      BUILD_DEFINITIONNAME: 'buildDefinitionName',
 
       BUILD_SOURCEVERSION: 'commit',
       BUILD_SOURCEBRANCHNAME: 'branch',
@@ -1305,6 +1438,8 @@ describe('lib/util/ci_provider', () => {
       systemStageattempt: 'stageAttempt',
       systemPhaseattempt: 'phaseAttempt',
       systemJobattempt: 'jobAttempt',
+      systemTeamproject: 'teamProject',
+      buildDefinitionname: 'buildDefinitionName',
     })
 
     return expectsCommitParams({

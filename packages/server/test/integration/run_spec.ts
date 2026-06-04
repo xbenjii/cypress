@@ -8,6 +8,7 @@ import browserUtils from '../../lib/browsers'
 import { fs as fsUtil } from '../../lib/util/fs'
 import { getCtx } from '../../lib/makeDataContext'
 import { OpenProject } from '../../lib/open_project'
+import * as errors from '../../lib/errors'
 
 describe('lib/modes/run', () => {
   let browserConnectTimeoutPlaceholder
@@ -164,6 +165,38 @@ describe('lib/modes/run', () => {
     await run(options, Promise.resolve())
   })
 
+  it('falls back to cwd when projectRoot is unset', async () => {
+    const fallbackRoot = '/path/to/cwd/fallback'
+    const mockedRelativeSupportFilePath = 'cypress/support/e2e.js'
+
+    options = {
+      ...options,
+      projectRoot: undefined,
+      cwd: fallbackRoot,
+    }
+
+    // @ts-expect-error
+    fsUtil.access.withArgs(fallbackRoot).resolves()
+    // @ts-expect-error
+    process.chdir.withArgs(fallbackRoot).returns()
+    // @ts-expect-error
+    fs.statSync.withArgs(fallbackRoot).returns({
+      isDirectory: () => true,
+    })
+
+    // @ts-expect-error
+    fsExtra.pathExists.withArgs(`${fallbackRoot}/${mockedRelativeSupportFilePath}`).resolves(true)
+    // @ts-expect-error
+    FileDataSource.prototype.getFilesByGlob.withArgs(fallbackRoot, 'cypress/support/e2e.{js,jsx,ts,tsx}').resolves([`${fallbackRoot}/${mockedRelativeSupportFilePath}`])
+
+    // @ts-expect-error
+    sinon.stub(OpenProject.prototype, 'launch').resolves()
+
+    await run(options, Promise.resolve())
+
+    expect(fsUtil.access).to.have.been.calledWith(fallbackRoot)
+  })
+
   it('completes successfully when no specs are found and passWithNoTests is true', async () => {
     specs = []
     ctx.project._specs = []
@@ -172,5 +205,29 @@ describe('lib/modes/run', () => {
     const result = await run(options, Promise.resolve())
 
     expect(result).to.be.an('object')
+  })
+
+  it('retries launching the browser when FIREFOX_COULD_NOT_CONNECT is thrown', async () => {
+    let launchAttempt = 0
+
+    // @ts-expect-error
+    sinon.stub(OpenProject.prototype, 'launch').callsFake((_browser, _spec, _browserOpts) => {
+      launchAttempt++
+
+      // Reject the first launch with FIREFOX_COULD_NOT_CONNECT to simulate the
+      // transient BiDi-not-ready failure. Subsequent attempts succeed so the
+      // retry path can complete.
+      if (launchAttempt === 1) {
+        return Promise.reject(errors.get('FIREFOX_COULD_NOT_CONNECT', new Error('No connection to WebDriver Bidi was established')))
+      }
+
+      return Promise.resolve()
+    })
+
+    await run(options, Promise.resolve())
+
+    // Initial launch + retry for the first spec, then a successful launch per
+    // remaining spec — assert we retried at least once past the initial failure.
+    expect(launchAttempt).to.be.greaterThan(1)
   })
 })

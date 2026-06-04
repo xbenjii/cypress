@@ -9,7 +9,7 @@ import assert from 'assert'
 
 import recordMode from './record'
 import * as errors from '../errors'
-import Reporter from '../reporter'
+import { Reporter } from '../reporter'
 import browserUtils from '../browsers'
 import { openProject } from '../open_project'
 import * as videoCapture from '../video_capture'
@@ -19,7 +19,7 @@ import * as env from '../util/env'
 import trash from '../util/trash'
 import { id as randomId } from '../util/random'
 import * as system from '../util/system'
-import chromePolicyCheck from '../util/chrome_policy_check'
+import { run as runChromePolicyCheck } from '../util/chrome_policy_check'
 import type { SpecWithRelativeRoot, SpecFile, TestingType, OpenProjectLaunchOpts, FoundBrowser, BrowserVideoController, VideoRecording, ProcessOptions, ProtocolManagerShape, AutomationCommands } from '@packages/types'
 import type { Cfg, ProjectBase } from '../project-base'
 import type { Browser } from '../browsers/types'
@@ -31,6 +31,7 @@ import { EarlyExitTerminator } from '../util/graceful_crash_handling'
 import { passWithNoTests } from './pass-with-no-tests'
 import type { EmptyRunOptions } from './pass-with-no-tests'
 import type { CypressError } from '@packages/errors'
+import { isRunningAsElectronProcess } from '../util/electron-app'
 
 type SetScreenshotMetadata = (data: TakeScreenshotProps) => void
 export type ScreenshotMetadata = ReturnType<typeof screenshotMetadata>
@@ -317,6 +318,12 @@ async function startVideoRecording (options: { previous?: VideoRecording, projec
         videoRecording.controller = videoController
       },
       onProjectCaptureVideoFrames (fn) {
+        // browsers that capture video through the project event emitter (e.g. Firefox via the
+        // driver's getUserMedia recorder) re-register a handler for each spec, since the browser
+        // — and thus the project — is reused across specs. Remove any previous handler first so
+        // frames are only ever written to the current spec's video controller and listeners don't
+        // accumulate across specs.
+        options.project.removeAllListeners('capture:video:frames')
         options.project.on('capture:video:frames', fn)
       },
     },
@@ -560,10 +567,17 @@ async function waitForBrowserToConnect (options: { project: Project, socketId: s
     .then(() => {
       telemetry.getSpan(`waitForBrowserToConnect:attempt:${browserLaunchAttempt}`)?.end()
     })
-    .catch(Bluebird.TimeoutError, async (err) => {
-      debug('Catch on waitForBrowserToConnect')
+    .catch((err) => {
+      const isTimeout = err instanceof Bluebird.TimeoutError
+      const isFirefoxConnect = (err as CypressError)?.type === 'FIREFOX_COULD_NOT_CONNECT'
 
-      return retryOnError(err as CypressError)
+      if (isTimeout || isFirefoxConnect) {
+        debug('Catch on waitForBrowserToConnect: %s', isTimeout ? 'timeout' : 'firefox could not connect')
+
+        return retryOnError(err as CypressError)
+      }
+
+      throw err
     })
   }
 
@@ -684,6 +698,17 @@ async function waitForTestsToFinishRunning (options: { project: Project, screens
     // the video file no longer exists at the path where we expect it,
     // possibly because the user deleted it in the after:spec event
     debug(`No video found after spec ran - skipping compression. Video path: ${videoName}`)
+
+    const compressedVideoName = videoRecording?.api.compressedVideoName
+
+    if (compressedVideoName) {
+      try {
+        debug('removing compressed video file: %s', compressedVideoName)
+        await fs.remove(compressedVideoName)
+      } catch (err) {
+        debug('Error removing compressed video file: %o', err)
+      }
+    }
 
     results.video = null
   }
@@ -1022,6 +1047,7 @@ export interface ReadyOptions {
   browser: string
   browsers?: FoundBrowser[]
   ciBuildId: string
+  cwd?: string
   exit: boolean
   group: string
   headed: boolean
@@ -1029,7 +1055,7 @@ export interface ReadyOptions {
   onError?: (err: Error) => void
   outputPath: string
   parallel: boolean
-  projectRoot: string
+  projectRoot?: string
   quiet: boolean
   record: boolean
   socketId: string
@@ -1053,7 +1079,14 @@ async function ready (options: ReadyOptions) {
     quiet: false,
   })
 
-  const { projectRoot, record, key, ciBuildId, parallel, group, browser: browserName, tag, testingType, socketId, autoCancelAfterFailures } = options
+  // projectRoot can be undefined when --project/--run-project is omitted, or when
+  // argv parsing leaves project as a boolean (for example `--project` with no
+  // path). Fall back to cwd here rather than in args.ts, which would
+  // incorrectly set currentProject in global open mode and bypass the Launchpad
+  // project picker.
+  options.projectRoot = options.projectRoot ?? String(options.cwd ?? process.cwd())
+  const projectRoot = options.projectRoot
+  const { record, key, ciBuildId, parallel, group, browser: browserName, tag, testingType, socketId, autoCancelAfterFailures } = options
 
   assert(socketId)
 
@@ -1126,9 +1159,9 @@ async function ready (options: ReadyOptions) {
       await writeOutput(options.outputPath, createPublicRunResults(results))
 
       return results
-    } else {
-      errors.throwErr('NO_SPECS_FOUND', projectRoot, String(specPattern))
     }
+
+    errors.throwErr('NO_SPECS_FOUND', projectRoot, String(specPattern))
   }
 
   if (browser.unsupportedVersion && browser.warning) {
@@ -1136,7 +1169,7 @@ async function ready (options: ReadyOptions) {
   }
 
   if (browser.family === 'chromium') {
-    chromePolicyCheck.run(onWarning)
+    runChromePolicyCheck(onWarning)
   }
 
   async function runAllSpecs ({ beforeSpecRun, afterSpecRun, runUrl, parallel }: { beforeSpecRun?: BeforeSpecRun, afterSpecRun?: AfterSpecRun, runUrl?: string, parallel?: boolean }) {
@@ -1214,7 +1247,7 @@ async function ready (options: ReadyOptions) {
 export async function run (options, loading: Promise<void>) {
   debug('run start')
   // Check if running as electron process
-  if (require('../util/electron-app').isRunningAsElectronProcess({ debug })) {
+  if (isRunningAsElectronProcess({ debug })) {
     // tslint:disable-next-line no-implicit-dependencies - electron dep needs to be defined
     const app = require('electron').app
 

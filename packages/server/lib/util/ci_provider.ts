@@ -18,6 +18,15 @@ const extract = (envKeys) => {
   return _.transform(envKeys, toCamelObject, {})
 }
 
+// The Jenkins Git plugin populates GIT_BRANCH with the remote-qualified
+// branch name (e.g. "origin/main" or "refs/remotes/origin/main"). Recording
+// the remote prefix causes the branch to not match the actual branch name in
+// Cypress Cloud, so strip the default "origin" remote prefix.
+// https://github.com/cypress-io/cypress/issues/20833
+const stripGitRemotePrefix = (branch?: string) => {
+  return branch && branch.replace(/^(refs\/remotes\/)?origin\//, '')
+}
+
 /**
  * Returns true if running on Azure CI pipeline.
  * See environment variables in the issue #3657
@@ -90,6 +99,19 @@ const isJenkins = () => {
     process.env.HUDSON_HOME
 }
 
+// Argo CD injects build env vars during manifest generation (Helm, Kustomize, CMPs).
+// Ref: https://argo-cd.readthedocs.io/en/stable/user-guide/build-environment/
+const isArgoCd = () => {
+  return Boolean(process.env.ARGOCD_APP_NAME && process.env.ARGOCD_APP_REVISION)
+}
+
+// Argo Workflows injects executor env vars on workflow pods.
+// Ref: https://github.com/argoproj/argo-workflows/blob/main/workflow/common/common.go
+const isArgoWorkflows = () => {
+  // Injected together on workflow executor pods; avoids matching unrelated ARGO_* operator env vars.
+  return Boolean(process.env.ARGO_WORKFLOW_NAME && process.env.ARGO_NODE_ID)
+}
+
 /**
  * We detect CI providers by detecting an environment variable
  * unique to the provider, or by calling a function that returns true
@@ -100,6 +122,8 @@ const isJenkins = () => {
  */
 const CI_PROVIDERS = {
   'appveyor': 'APPVEYOR',
+  argoCd: isArgoCd,
+  argoWorkflows: isArgoWorkflows,
   'azure': isAzureCi,
   // Amplify Console runs on CodeBuild and can expose CODEBUILD_* env vars.
   // Since provider detection picks the first match, the more specific provider
@@ -157,6 +181,10 @@ const _userProvidedProviderCiParams = () => {
     'CYPRESS_PULL_REQUEST_ID',
     'CYPRESS_PULL_REQUEST_URL',
     'CYPRESS_CI_BUILD_URL',
+    // Users can set these to override automatic detection of a rerun or enable
+    // it for unsupported CI providers
+    'CYPRESS_RERUN_GROUP_ID', // ID shared by a run and its retries
+    'CYPRESS_RERUN_ALL_TESTS', // Opt out of only rerunning failed tests and force all tests to be rerun
   ])
 }
 // TODO: don't forget about buildNumber!
@@ -173,6 +201,30 @@ const _providerCiParams = () => {
       'APPVEYOR_PULL_REQUEST_NUMBER',
       'APPVEYOR_PULL_REQUEST_HEAD_REPO_BRANCH',
     ]),
+    // https://argo-cd.readthedocs.io/en/stable/user-guide/build-environment/
+    argoCd: extract([
+      'ARGOCD_APP_NAME',
+      'ARGOCD_APP_NAMESPACE',
+      'ARGOCD_APP_PROJECT_NAME',
+      'ARGOCD_APP_REVISION',
+      'ARGOCD_APP_REVISION_SHORT',
+      'ARGOCD_APP_REVISION_SHORT_8',
+      'ARGOCD_APP_SOURCE_PATH',
+      'ARGOCD_APP_SOURCE_REPO_URL',
+      'ARGOCD_APP_SOURCE_TARGET_REVISION',
+      'KUBE_VERSION',
+      'KUBE_API_VERSIONS',
+    ]),
+    // https://github.com/argoproj/argo-workflows/blob/main/workflow/common/common.go
+    argoWorkflows: extract([
+      'ARGO_WORKFLOW_NAME',
+      'ARGO_WORKFLOW_UID',
+      'ARGO_NODE_ID',
+      'ARGO_POD_NAME',
+      'ARGO_POD_UID',
+      'ARGO_CONTAINER_NAME',
+      'ARGO_INSTANCE_ID',
+    ]),
     // https://learn.microsoft.com/en-us/azure/devops/pipelines/build/variables
     azure: extract([
       'BUILD_BUILDID',
@@ -187,6 +239,8 @@ const _providerCiParams = () => {
       'SYSTEM_PULLREQUEST_PULLREQUESTNUMBER',
       'SYSTEM_PULLREQUEST_TARGETBRANCH',
       'SYSTEM_PULLREQUEST_TARGETBRANCHNAME',
+      'SYSTEM_TEAMPROJECT',
+      'BUILD_DEFINITIONNAME',
     ]),
     awsCodeBuild: extract([
       'CODEBUILD_BUILD_ID',
@@ -259,6 +313,7 @@ const _providerCiParams = () => {
       'BITBUCKET_PR_ID',
       'BITBUCKET_PR_DESTINATION_BRANCH',
       'BITBUCKET_PR_DESTINATION_COMMIT',
+      'BITBUCKET_PIPELINE_UUID',
     ]),
     // https://buildkite.com/docs/pipelines/configure/environment-variables
     buildkite: extract([
@@ -288,6 +343,8 @@ const _providerCiParams = () => {
       'CIRCLE_PULL_REQUEST',
       'CIRCLE_REPOSITORY_URL',
       'CI_PULL_REQUEST',
+      'CIRCLE_PROJECT_REPONAME',
+      'CIRCLE_WORKFLOW_WORKSPACE_ID',
     ]),
     cloudbeesUnify: extract([
       'CLOUDBEES_WORKSPACE',
@@ -512,6 +569,13 @@ const _providerCommitParams = () => {
       // remoteOrigin: ???
       // defaultBranch: ???
     },
+    argoCd: {
+      sha: env.ARGOCD_APP_REVISION,
+      branch: env.ARGOCD_APP_SOURCE_TARGET_REVISION,
+      remoteOrigin: env.ARGOCD_APP_SOURCE_REPO_URL,
+      // message, authorName, authorEmail, defaultBranch: not provided by Argo CD build env
+    },
+    argoWorkflows: {},
     awsCodeBuild: {
       sha: env.CODEBUILD_RESOLVED_SOURCE_VERSION,
       // branch: ???,
@@ -648,7 +712,10 @@ const _providerCommitParams = () => {
     },
     jenkins: {
       sha: env.GIT_COMMIT,
-      branch: env.GIT_BRANCH || env.BRANCH_NAME || env.CHANGE_BRANCH,
+      // GIT_LOCAL_BRANCH and BRANCH_NAME (multibranch pipeline plugin) hold the
+      // unprefixed branch name, so prefer them over GIT_BRANCH, which the Git
+      // plugin prefixes with the remote name (e.g. "origin/main").
+      branch: env.GIT_LOCAL_BRANCH || env.BRANCH_NAME || stripGitRemotePrefix(env.GIT_BRANCH) || env.CHANGE_BRANCH,
       // message: ??,
       authorName: env.GIT_AUTHOR_NAME || env.CHANGE_AUTHOR_DISPLAY_NAME,
       authorEmail: env.GIT_AUTHOR_EMAIL || env.CHANGE_AUTHOR_EMAIL,

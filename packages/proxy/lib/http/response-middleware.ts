@@ -9,7 +9,7 @@ import { InterceptResponse } from '@packages/net-stubbing'
 import { concatStream, httpUtils } from '@packages/network'
 import { getDomainNameFromUrl, DocumentDomainInjection } from '@packages/network-tools'
 import { toughCookieToAutomationCookie } from '@packages/server/lib/util/cookies'
-import type { RemoteState } from '@packages/server/lib/remote_states'
+import type { RemoteState } from '@packages/network-tools'
 import { telemetry } from '@packages/telemetry'
 import { hasServiceWorkerHeader, isVerboseTelemetry as isVerbose } from '.'
 import { CookiesHelper } from './util/cookies'
@@ -44,6 +44,13 @@ interface ResponseMiddlewareProps {
    * same order when multiple encodings (e.g. gzip, br) were present.
    */
   contentEncodingOrder: SupportedContentEncoding[]
+  /**
+   * Set in OmitProblematicHeaders when the origin response declared `Content-Length: 0`,
+   * before that header is stripped. Consumed by MaybeEndWithEmptyBody so the proxy can
+   * re-emit `Content-Length: 0` instead of letting Node's HTTP layer fall back to
+   * `Transfer-Encoding: chunked` for an empty body. See cypress-io/cypress#16469.
+   */
+  incomingResHadEmptyBody: boolean
   incomingRes: IncomingMessage
   incomingResStream: Readable
 }
@@ -375,6 +382,8 @@ const PatchExpressSetHeader: ResponseMiddleware = function () {
 const OmitProblematicHeaders: ResponseMiddleware = function () {
   const span = telemetry.startSpan({ name: 'omit:problematic:header', parentSpan: this.resMiddlewareSpan, isVerbose })
 
+  this.incomingResHadEmptyBody = this.incomingRes.headers['content-length'] === '0'
+
   const headers = _.omit(this.incomingRes.headers, [
     'set-cookie',
     'x-frame-options',
@@ -694,13 +703,13 @@ const MaybeCopyCookiesFromIncomingRes: ResponseMiddleware = async function () {
 
   const cookies: string | string[] | undefined = this.incomingRes.headers['set-cookie']
 
-  const areCookiesPresent = !cookies || !cookies.length
+  const areCookiesAbsent = !cookies || !cookies.length
 
   span?.setAttributes({
-    areCookiesPresent,
+    areCookiesAbsent,
   })
 
-  if (areCookiesPresent) {
+  if (areCookiesAbsent) {
     setSimulatedCookies(this)
 
     span?.end()
@@ -745,16 +754,6 @@ const MaybeCopyCookiesFromIncomingRes: ResponseMiddleware = async function () {
     }
   }
 
-  if (!doesTopNeedSimulating) {
-    ([] as string[]).concat(cookies).forEach((cookie) => {
-      appendCookie(cookie)
-    })
-
-    span?.end()
-
-    return this.next()
-  }
-
   const cookiesHelper = new CookiesHelper({
     cookieJar: this.getCookieJar(),
     currentAUTUrl: this.getAUTUrl(),
@@ -770,11 +769,29 @@ const MaybeCopyCookiesFromIncomingRes: ResponseMiddleware = async function () {
 
   await cookiesHelper.capturePreviousCookies()
 
+  // Record the response's cookies in our server-side cookie jar (subject to the
+  // same rules the browser would apply via `CookiesHelper.setCookie`) and append
+  // them to the response so the browser sets them too. We update the jar even
+  // when top does not need to be simulated: otherwise a same-origin XHR/fetch
+  // that sets a cookie would update the browser but not the jar, leaving the jar
+  // stale. A later top-level navigation reads from the jar and would overwrite
+  // the request's fresh cookie with the stale value.
+  // See https://github.com/cypress-io/cypress/issues/25841
   ;([] as string[]).concat(cookies).forEach((cookie) => {
     cookiesHelper.setCookie(cookie)
 
     appendCookie(cookie)
   })
+
+  // When top does not need to be simulated, the AUT is the primary super domain
+  // origin and the browser sets the response's cookies itself, so there's no
+  // need to sync cookies into the browser via automation. The server-side cookie
+  // jar has already been kept in sync above.
+  if (!doesTopNeedSimulating) {
+    span?.end()
+
+    return this.next()
+  }
 
   setSimulatedCookies(this)
 
@@ -870,13 +887,13 @@ const ClearCyInitialCookie: ResponseMiddleware = function () {
 }
 
 const MaybeEndWithEmptyBody: ResponseMiddleware = function () {
-  if (httpUtils.responseMustHaveEmptyBody(this.req, this.incomingRes)) {
+  const notifyProtocolManagerOfEmptyBody = (isCached: boolean) => {
     if (this.protocolManager && this.req.browserPreRequest?.requestId) {
       const requestId = getOriginalRequestId(this.req.browserPreRequest.requestId)
 
       this.protocolManager.responseEndedWithEmptyBody({
         requestId,
-        isCached: this.incomingRes.statusCode === 304,
+        isCached,
         timings: {
           cdpRequestWillBeSentTimestamp: this.req.browserPreRequest.cdpRequestWillBeSentTimestamp,
           cdpRequestWillBeSentReceivedTimestamp: this.req.browserPreRequest.cdpRequestWillBeSentReceivedTimestamp,
@@ -886,7 +903,34 @@ const MaybeEndWithEmptyBody: ResponseMiddleware = function () {
         },
       })
     }
+  }
 
+  if (httpUtils.responseMustHaveEmptyBody(this.req, this.incomingRes)) {
+    notifyProtocolManagerOfEmptyBody(this.incomingRes.statusCode === 304)
+
+    this.res.end()
+
+    return this.end()
+  }
+
+  // When the origin response declared `Content-Length: 0`, short-circuit with an
+  // explicit Content-Length: 0 instead of streaming an empty body — otherwise
+  // OmitProblematicHeaders has stripped Content-Length and Node's HTTP layer
+  // adds `Transfer-Encoding: chunked`, which breaks clients that assume a
+  // response for chunked encoding. See cypress-io/cypress#16469.
+  // Skip when downstream middleware will rewrite the body or when a cy.intercept
+  // route matched (the interceptor may have replaced the body without updating
+  // the upstream Content-Length header).
+  const wasIntercepted = !!this.netStubbingState?.requests?.[this.req.requestId]
+
+  if (
+    this.incomingResHadEmptyBody
+    && !wasIntercepted
+    && !this.res.wantsInjection
+    && !this.res.wantsSecurityRemoved
+  ) {
+    notifyProtocolManagerOfEmptyBody(false)
+    this.res.setHeader('Content-Length', '0')
     this.res.end()
 
     return this.end()

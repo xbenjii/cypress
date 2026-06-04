@@ -9,7 +9,7 @@ import xvfb from './xvfb'
 import { needsSandbox } from '../tasks/verify'
 import { throwFormErrorText, getErrorSync, errors } from '../errors'
 import readline from 'readline'
-import { stdin, stdout, stderr } from 'process'
+import process, { stdin, stdout, stderr } from 'process'
 import { relativeToRepoRoot } from '../relative-to-repo-root'
 import { filter, DEBUG_PREFIX } from '@packages/stderr-filtering'
 import { PassThrough } from 'stream'
@@ -17,6 +17,9 @@ import { PassThrough } from 'stream'
 const debug = Debug('cypress:cli')
 const debugElectron = Debug('cypress:electron')
 const debugStderr = Debug('cypress:internal-stderr')
+
+// Must match CYPRESS_OPEN_READY_MESSAGE in packages/server/lib/modes/interactive.ts
+const CYPRESS_OPEN_READY_MESSAGE = 'Cypress is ready'
 
 function isPlatform (platform: string): boolean {
   return os.platform() === platform
@@ -109,6 +112,14 @@ function createSpawnFunction (
         stdioOptions.env.DISPLAY = process.env.DISPLAY
       }
 
+      if (stdioOptions.detached) {
+        // Ask interactive mode to print a ready sentinel on stdout; pipe stdio during
+        // startup so errors are visible and we can detect it. Streams are destroyed
+        // once it arrives so they don't keep the parent event loop alive.
+        args.push('--emit-when-ready')
+        stdioOptions.stdio = ['ignore', 'pipe', 'pipe']
+      }
+
       if (stdioOptions.env.ELECTRON_RUN_AS_NODE) {
         // Since we are running electron as node, we need to add an entry point file.
         startScriptPath = path.join(state.getBinaryPkgPath(path.dirname(executable)), '..', 'index.js')
@@ -141,18 +152,17 @@ function createSpawnFunction (
         return function (code: any, signal: NodeJS.Signals): void {
           debug('child event fired %o', { event, code, signal })
 
-          if (code === null) {
-            const errorObject = errors.childProcessKilled(event, signal)
-
-            errorObject.platform = platform
-            const err = getErrorSync(errorObject, platform)
-
-            reject(err)
+          if (signal) {
+            if (signal === 'SIGINT') {
+              resolve(0)
+            } else {
+              resolve(128 + os.constants.signals[signal])
+            }
 
             return
           }
 
-          resolve(code)
+          resolve(code ?? 1)
         }
       }
 
@@ -177,6 +187,49 @@ function createSpawnFunction (
 
           kill(child.pid as number, 'SIGINT')
         })
+      } else {
+        // Adding listeners here prevents immediate process.exit() for these signals.
+        // Exiting when the child process exits instead will allow the child process
+        // to log during the exit process.
+
+        // Unlike in windows, we do not need to propagate these signals to the child process
+        // tree.
+        for (const signal of ['SIGINT', 'SIGTERM']) {
+          debug('adding message for signal listener for %s', signal)
+          process.once(signal, async function () {
+            console.log(`\n\n${signal} received; Attempting to exit gracefully. Force exit with ^C again if needed.\n\n`)
+            if (process.stdin.isTTY) {
+              process.stdin.setRawMode(false)
+            }
+          })
+        }
+      }
+
+      if (stdioOptions.detached) {
+        child.stdout!.on('data', (data: Buffer) => {
+          const str = data.toString()
+          const readyMessageIndex = str.indexOf(CYPRESS_OPEN_READY_MESSAGE)
+          const isReady = readyMessageIndex !== -1
+
+          if (isReady) {
+            const outputBeforeReady = str.slice(0, readyMessageIndex)
+
+            if (outputBeforeReady) stdout.write(outputBeforeReady)
+
+            child.stdout!.destroy()
+            child.stderr!.destroy()
+            child.unref()
+            resolve(0)
+
+            return
+          }
+
+          stdout.write(data)
+        })
+
+        child.stderr!.pipe(stderr, { end: false })
+
+        return
       }
 
       // if stdio options is set to 'pipe', then
@@ -236,16 +289,13 @@ function createSpawnFunction (
       // to have any effect. so we're just catching the
       // error here and not doing anything.
       stdin.on('error', (err: any) => {
+        debug('error on stdin', err)
         if (['EPIPE', 'ENOTCONN'].includes(err.code)) {
           return
         }
 
         reject(err)
       })
-
-      if (stdioOptions.detached) {
-        child.unref()
-      }
     })
   }
 }

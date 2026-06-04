@@ -115,7 +115,6 @@
         "lib/capture.ts",
         "lib/runner-ct.ts",
         "lib/cloud/artifacts/upload_artifacts.ts",
-        "lib/plugins/child/default_plugins_file.js",
         "lib/privileged-commands/privileged-channel.js",
         "lib/util/**/*.{ts,js}",
         "test/**/*.{ts,js}"
@@ -135,7 +134,9 @@
         "babel-loader",
         "playwright-core",
         "playwright-webkit",
-        "tsx"
+        "tsx",
+        "mocha",
+        "zod"
       ]
     },
     "packages/launchpad": {
@@ -413,6 +414,14 @@
         "lib/**/*.{ts,tsx,js,jsx}"
       ]
     },
+    "packages/network-interception": {
+      "entry": [
+        "lib/index.ts"
+      ],
+      "project": [
+        "lib/**/*.{ts,tsx,js,jsx}"
+      ]
+    },
     "packages/resolve-dist": {
       "entry": [
         "lib/index.ts"
@@ -540,6 +549,7 @@
     },
     "npm/react": {
       "entry": [
+        "cypress/support/**/*.{js,jsx,ts,tsx}",
         "cypress/component/**/*.{jsx,tsx,cy.jsx,cy.tsx}"
       ],
       "project": [
@@ -655,6 +665,7 @@
         "@babel/core",
         "@babel/preset-env",
         "babel-loader",
+        "mocha",
         "mochawesome-7.1.4",
         "semver",
         "systeminformation",
@@ -708,7 +719,6 @@
     "@types/*",
     "eslint-*",
     "prettier",
-    "mocha",
     "chai",
     "sinon",
     "cypress",
@@ -772,12 +782,6 @@
     "packages/server/lib/cloud/protocol.ts": [
       "exports"
     ],
-    "packages/server/lib/plugins/child/cross_origin.js": [
-      "exports"
-    ],
-    "packages/server/lib/plugins/child/dev-server.js": [
-      "exports"
-    ],
     "packages/server/lib/video_capture.ts": [
       "exports"
     ],
@@ -787,6 +791,19 @@
     ],
     "packages/net-stubbing/lib/external-types.ts": [
       "exports",
+      "types"
+    ],
+    "packages/network-interception/lib/types/external-types.ts": [
+      "exports",
+      "types"
+    ],
+    "packages/network-interception/lib/ports/driven-ports.ts": [
+      "types"
+    ],
+    "packages/network-interception/lib/ports/driving-ports.ts": [
+      "types"
+    ],
+    "packages/network-interception/lib/exchange/network-exchange.ts": [
       "types"
     ],
     "npm/react/cypress/component/advanced/lazy-loaded-suspense/Dog.tsx": [
